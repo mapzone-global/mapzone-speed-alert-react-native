@@ -1,0 +1,30 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.mapzonespeedalert'
+version = '1.0.0'
+
+// Native MapZone Speed Alert SDK binary is consumed from JitPack. Hosts that
+// lock repositories with RepositoriesMode.FAIL_ON_PROJECT_REPOS must add
+// jitpack to their own settings.gradle (see README).
+repositories {
+  maven { url 'https://jitpack.io' }
+}
+
+android {
+  namespace "expo.modules.mapzonespeedalert"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  // Pinned to the native SDK release this wrapper was verified against.
+  implementation 'com.github.mapzone-global:mapzone_speed_alert_android:2.0.6'
+}

@@ -1,0 +1,5 @@
+{
+  "project_url": "http://redmine.vm.local/projects/mapzone-spd-sdk",
+  "default_tracker": "Task",
+  "role": "sdk"
+}
