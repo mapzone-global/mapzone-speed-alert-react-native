@@ -124,14 +124,10 @@ SpeedAlert.configure({
 | `vehicleType` | Vehicle |
 |---|---|
 | 1 | Car |
-| 2 | Motorcycle |
 | 3 | Truck |
 | 4 | Coach |
 | 5 | Bus |
 | 6 | Taxi |
-| 7 | Bicycle |
-| 8 | Pedestrian |
-| 9 | Emergency vehicle |
 
 `vehicleType`, `seats` and `weights` decide which alerts apply to you. The
 "vehicle restricted" sign (§6.3) is computed for exactly this profile, and
