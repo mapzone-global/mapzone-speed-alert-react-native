@@ -6,6 +6,7 @@ import android.os.Looper
 import android.util.Base64
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import map.zone.speedalertsdk.VehicleType
 import map.zone.speedalertsdk.VoiceAlertType
 import map.zone.speedalertsdk.VoiceCallback
 import map.zone.speedalertsdk.VoiceProfile
@@ -15,9 +16,11 @@ import map.zone.speedalertsdk.ZoneNetworkManager
  * Expo Module wrapping the native `ZoneNetworkManager`. Function order mirrors
  * the native class and the Swift module so the three can be diffed side by side.
  *
- * Every event except `onVoice` is wired for the module's lifetime. `onVoice`
- * is wired only while JS has a listener, preserving native semantics: the
- * built-in voice player stays active until a voice callback is set.
+ * Every event except `onVoice` and `onSnappedLocation` is wired for the
+ * module's lifetime. `onVoice` is wired only while JS has a listener,
+ * preserving native semantics: the built-in voice player stays active until a
+ * voice callback is set. `onSnappedLocation` likewise, because native only
+ * builds the per-tick upcall while a callback is set.
  *
  * The three restriction groups fire natively only when they change, so the
  * latest state of each is cached and replayed when JS starts observing that
@@ -46,6 +49,9 @@ class MapZoneSpeedAlertModule : Module() {
       "onVoice",
       "onResult",
       "onReady",
+      "onSnappedLocation",
+      // Internal: settles the JS promise of `logout()`, matched by requestId.
+      "onLogoutResult",
     )
 
     Class(AlertSignRef::class) {
@@ -133,11 +139,47 @@ class MapZoneSpeedAlertModule : Module() {
       if (activeModule === this@MapZoneSpeedAlertModule) manager.setVoiceCallback(null)
     }
 
+    OnStartObserving("onSnappedLocation") {
+      manager.setSnappedLocationCallback { latitude, longitude, bearingDegrees ->
+        sendEvent(
+          "onSnappedLocation",
+          mapOf("latitude" to latitude, "longitude" to longitude, "bearingDegrees" to bearingDegrees),
+        )
+      }
+    }
+    OnStopObserving("onSnappedLocation") {
+      if (activeModule === this@MapZoneSpeedAlertModule) manager.setSnappedLocationCallback(null)
+    }
+
+    // Synchronous on the JS thread, like `onLocation`, so a configure issued
+    // before a fix reaches native before it. Returns null when applied,
+    // otherwise the native reason. JS has already checked `vehicleType`
+    // against `VehicleType`; an unknown code would make native throw.
     Function("configure") { options: ConfigureRecord ->
-      manager.configure(
-        options.baseUrl, options.apiKeyId, options.apiKey, options.vehicleId,
-        options.vehicleType, options.seats, options.weights,
+      val rejectionReason: String? = manager.configure(
+        options.baseUrl, options.apiKeyId, options.apiKey, options.identity,
+        VehicleType.fromValue(options.vehicleType), options.seats, options.weightsTons,
+        options.metadata,
       )
+      rejectionReason
+    }
+    // Synchronous on the JS thread too: native closes the zone gate before
+    // returning, so no fix or configure issued afterwards can overtake it. The
+    // server answer arrives on the main thread and goes back as
+    // `onLogoutResult`; an AsyncFunction would run this on another queue and
+    // lose that ordering.
+    Function("logout") { requestId: Int ->
+      manager.logout { success, errorCode, errorMessage ->
+        sendEvent(
+          "onLogoutResult",
+          mapOf(
+            "requestId" to requestId,
+            "success" to success,
+            "errorCode" to errorCode,
+            "errorMessage" to errorMessage,
+          ),
+        )
+      }
     }
     // Both calls only enqueue work on the SDK's single-thread executor, so the
     // zone load (if any) always runs before this tick's matching.
@@ -172,6 +214,7 @@ class MapZoneSpeedAlertModule : Module() {
       manager.setVoiceCallback(null)
       manager.setResultCallback(null)
       manager.setReadyCallback(null)
+      manager.setSnappedLocationCallback(null)
       manager.reset()
     }
   }

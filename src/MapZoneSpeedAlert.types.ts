@@ -1,10 +1,26 @@
 import type { SharedRef } from 'expo-modules-core';
 
 /**
- * Credentials and vehicle profile for the native engine. All fields are
- * required; call `configure()` once before the first `onLocation()`. When the
- * vehicle profile changes, call `reset()` and then `configure()` again. The
- * application id (bundle id) is resolved natively.
+ * Vehicle the alerts are computed for. Each value is the MapZone server's own
+ * vehicle code and is sent unchanged. Values MUST match `VehicleType.java` /
+ * `VehicleType` (Swift) in the native SDK. The type must also be enabled for
+ * the API key, otherwise sign-in reports `1001` and zone loads `3003`.
+ */
+export enum VehicleType {
+  CAR = 1,
+  TAXI = 2,
+  BUS = 3,
+  COACH = 4,
+  TRUCK = 5,
+  MOTORCYCLE = 7,
+}
+
+/**
+ * Credentials, signed-in identity and vehicle profile for the native engine.
+ * Call `configure()` when the user signs in — and on every app launch with a
+ * user already signed in — and await it before the first `onLocation()`. When
+ * the vehicle profile changes, call `reset()` and then `configure()` again.
+ * The application id (bundle id) is resolved natively.
  */
 export type ConfigureOptions = {
   /** Bare host of the zone API, e.g. `https://driving.map.zone`. Must start with `https://`. */
@@ -12,14 +28,61 @@ export type ConfigureOptions = {
   apiKeyId: string;
   /** Authentication secret paired with `apiKeyId`. Do not log it or ship it in source control. */
   apiKey: string;
-  vehicleId: string;
-  /** Vehicle category code as defined by the alert service. Integer. */
-  vehicleType: number;
-  /** Integer. */
+  /**
+   * The signed-in user or vehicle, e.g. the account's phone number
+   * `"+84901234567"`. Sent verbatim and matched exactly — `"0901…"` and
+   * `"+84901…"` are two different users. Non-empty, at most 128 characters,
+   * no `"` and no control characters. One identity is active on one device at
+   * a time.
+   */
+  identity: string;
+  vehicleType: VehicleType;
+  /** Number of seats, 0 or more. Integer. */
   seats: number;
-  /** Vehicle gross weight in kg. Fractions are truncated natively. */
-  weights: number;
+  /** Vehicle gross weight in **tonnes** (1500 kg → `1.5`), 0 or more. */
+  weightsTons: number;
+  /**
+   * Optional information about this device / user, stored with the session
+   * when it is opened (first sign-in on this device, or a new identity).
+   * Serialised to JSON: at most 2048 UTF-8 bytes, nesting depth at most 16.
+   * The SDK adds `model` and `os` unless you set them.
+   */
+  metadata?: Record<string, unknown> | null;
 };
+
+/** Result of `logout()`. `success` is also `true` when nobody was signed in. */
+export type LogoutResult = {
+  success: boolean;
+  /** `0` on success, otherwise a code from the `onResult` table (see `MapZoneError`). */
+  errorCode: number;
+  errorMessage: string;
+};
+
+/**
+ * Codes the SDK acts on, delivered through `onResult` and `logout()`. Values
+ * MUST match `MapZoneError` in the native SDK. Branch on the number; the
+ * message that comes with it is an English sentence for logs and fallback UI.
+ */
+export enum MapZoneError {
+  /** No identity signed in: `logout()` was called, or `configure()` never was. */
+  NOT_LOGGED_IN = -6,
+  /** The device cannot be read yet; the SDK retries about once a minute. Show a notice. */
+  DEVICE_NOT_READY = -8,
+  /** The identity is now in use on another device. Call `logout()` and send the user to sign in. */
+  SESSION_MOVED = 2006,
+  /** Device or identity locked by an administrator. */
+  LOCKED = 2007,
+  /** The account on this device changed too recently; the SDK retries after 20 minutes. */
+  SWITCH_TOO_SOON = 2008,
+  /** Trial API key: this identity is not one of the key's sample identities. */
+  TRIAL_IDENTITY_NOT_ALLOWED = 2010,
+  /** The API key cannot register more new devices. */
+  NEW_DEVICE_LIMIT = 3012,
+  /** Too many requests; the SDK waits for the server's Retry-After. */
+  TOO_MANY_REQUESTS = 4000,
+  /** The API key has used up its request quota. */
+  REQUEST_QUOTA_EXCEEDED = 4001,
+}
 
 /** One GPS sample forwarded to the engine. */
 export type LocationFix = {
@@ -160,9 +223,10 @@ export type VoiceEvent = {
 };
 
 /**
- * Result of a zone-load attempt. `errorCode === 0` on success; positive codes
- * are server-reported, negative codes are local SDK failures. `errorMessage`
- * is produced by the native SDK from the code alone — localise off the code.
+ * Result of a sign-in or zone-load attempt. `errorCode === 0` on success;
+ * positive codes are server-reported, negative codes are local SDK failures
+ * (named ones in `MapZoneError`). `errorMessage` is produced by the native SDK
+ * from the code alone — localise off the code.
  */
 export type ResultEvent = {
   success: boolean;
@@ -176,6 +240,18 @@ export type ReadyEvent = {
   alertCount: number;
 };
 
+/**
+ * The fix moved onto the road the engine is serving. Emitted once per fix
+ * matched to a road (none while unmatched — keep the marker where it was);
+ * inside a short coverage hole the same point can repeat.
+ */
+export type SnappedLocationEvent = {
+  latitude: number;
+  longitude: number;
+  /** Road bearing in the direction of travel, 0 = north, clockwise, `[0, 360)`. */
+  bearingDegrees: number;
+};
+
 export type MapZoneSpeedAlertEvents = {
   onSigns: (event: SignsEvent) => void;
   onAccessRestriction: (event: AccessRestrictionEvent) => void;
@@ -184,4 +260,5 @@ export type MapZoneSpeedAlertEvents = {
   onVoice: (event: VoiceEvent) => void;
   onResult: (event: ResultEvent) => void;
   onReady: (event: ReadyEvent) => void;
+  onSnappedLocation: (event: SnappedLocationEvent) => void;
 };

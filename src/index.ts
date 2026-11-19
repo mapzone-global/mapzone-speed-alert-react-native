@@ -1,17 +1,20 @@
 import type { EventSubscription } from 'expo-modules-core';
 
-import type {
-  AccessRestrictionEvent,
-  BuildupAreaEvent,
-  ConfigureOptions,
-  LocationFix,
-  ReadyEvent,
-  ResultEvent,
-  SignsEvent,
-  StopRestrictionEvent,
-  VoiceAlertType,
-  VoiceEvent,
-  VoiceProfile,
+import {
+  VehicleType,
+  type AccessRestrictionEvent,
+  type BuildupAreaEvent,
+  type ConfigureOptions,
+  type LocationFix,
+  type LogoutResult,
+  type ReadyEvent,
+  type ResultEvent,
+  type SignsEvent,
+  type SnappedLocationEvent,
+  type StopRestrictionEvent,
+  type VoiceAlertType,
+  type VoiceEvent,
+  type VoiceProfile,
 } from './MapZoneSpeedAlert.types';
 import MapZoneSpeedAlertModule from './MapZoneSpeedAlertModule';
 
@@ -33,23 +36,82 @@ function requireInteger(functionName: string, argumentName: string, value: numbe
 }
 
 /**
- * Configure credentials and vehicle profile. Must precede the first
- * `onLocation()`. Throws when `baseUrl` is not `https://` or a numeric field
- * is not a finite number — checked here so both platforms fail the same way
- * (natively Android throws on the URL, iOS reports it through `onResult`).
+ * Sign the identity in and set the vehicle profile. Call it when the user
+ * signs in and on every app launch with a user already signed in, and await it
+ * before the first `onLocation()`. Everything that fails later (sign-in
+ * rejected, account in use elsewhere, …) arrives through `onResult`.
+ *
+ * Rejects — and applies nothing, the previous configuration stays — when the
+ * native SDK refuses an input (identity, seats, weight, metadata), with its
+ * reason as the message. Also rejects, before reaching native, when `baseUrl`
+ * is not `https://`, `vehicleType` is not a `VehicleType`, `seats` is not an
+ * integer or `weightsTons` is not finite, so both platforms fail the same way.
  */
-export function configure(options: ConfigureOptions): void {
+export async function configure(options: ConfigureOptions): Promise<void> {
   if (!options.baseUrl.startsWith('https://')) {
     throw new Error('MapZoneSpeedAlert.configure: baseUrl must start with https://');
   }
   requireInteger('configure', 'vehicleType', options.vehicleType);
-  requireInteger('configure', 'seats', options.seats);
-  if (!Number.isFinite(options.weights) || Math.abs(options.weights) > 2 ** 31 - 1) {
+  if (VehicleType[options.vehicleType] === undefined) {
     throw new TypeError(
-      `MapZoneSpeedAlert.configure: weights must be a finite number of kg, got ${options.weights}`
+      `MapZoneSpeedAlert.configure: vehicleType must be a VehicleType, got ${options.vehicleType}`
     );
   }
-  MapZoneSpeedAlertModule.configure(options);
+  requireInteger('configure', 'seats', options.seats);
+  if (!Number.isFinite(options.weightsTons)) {
+    throw new TypeError(
+      `MapZoneSpeedAlert.configure: weightsTons must be a finite number of tonnes, got ${options.weightsTons}`
+    );
+  }
+  const nativeOptions = {
+    baseUrl: options.baseUrl,
+    apiKeyId: options.apiKeyId,
+    apiKey: options.apiKey,
+    identity: options.identity,
+    vehicleType: options.vehicleType,
+    seats: options.seats,
+    weightsTons: options.weightsTons,
+    metadata: options.metadata == null ? null : JSON.stringify(options.metadata),
+  };
+  // Reaches native synchronously, so it stays in order with the calls that
+  // follow it (Android: JS thread; iOS: main queue).
+  const rejectionReason = await MapZoneSpeedAlertModule.configure(nativeOptions);
+  if (rejectionReason != null) {
+    throw new Error(`MapZoneSpeedAlert.configure: ${rejectionReason}`);
+  }
+}
+
+let nextLogoutRequestId = 1;
+
+/**
+ * Sign the identity out. Call it when the user signs out of your app, and
+ * after `MapZoneError.SESSION_MOVED` (the server then answers "no session",
+ * which counts as success). Zone loads stop at once: no `onLocation()` or
+ * `configure()` issued after this call can overtake it, and a `configure()`
+ * for the next user does not wait for the server. The zone already loaded
+ * keeps alerting. Resolves with the server's answer — a failed logout is
+ * `success: false`, not a rejection: the SDK then stays signed out locally;
+ * call `logout()` again to retry.
+ */
+export function logout(): Promise<LogoutResult> {
+  const requestId = nextLogoutRequestId++;
+  return new Promise((resolve, reject) => {
+    const subscription = MapZoneSpeedAlertModule.addListener('onLogoutResult', (event) => {
+      if (event.requestId !== requestId) return;
+      subscription.remove();
+      resolve({
+        success: event.success,
+        errorCode: event.errorCode,
+        errorMessage: event.errorMessage,
+      });
+    });
+    try {
+      MapZoneSpeedAlertModule.logout(requestId);
+    } catch (error) {
+      subscription.remove();
+      reject(error);
+    }
+  });
 }
 
 /**
@@ -78,7 +140,7 @@ export function onLocation(fix: LocationFix): void {
 /**
  * Drop loaded zone data and engine state. Call when a session ends or the
  * vehicle profile changes (then `configure()` again). Mute set, voice profile
- * and voice speed are kept.
+ * and voice speed are kept. Does not sign the user out — use `logout()`.
  */
 export function reset(): void {
   MapZoneSpeedAlertModule.reset();
@@ -152,4 +214,14 @@ export function addResultListener(listener: (event: ResultEvent) => void): Event
 
 export function addReadyListener(listener: (event: ReadyEvent) => void): EventSubscription {
   return MapZoneSpeedAlertModule.addListener('onReady', listener);
+}
+
+/**
+ * Each matched fix moved onto the road, for drawing the vehicle marker.
+ * The native callback is only registered while at least one listener exists.
+ */
+export function addSnappedLocationListener(
+  listener: (event: SnappedLocationEvent) => void
+): EventSubscription {
+  return MapZoneSpeedAlertModule.addListener('onSnappedLocation', listener);
 }

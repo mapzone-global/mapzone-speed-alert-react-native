@@ -5,9 +5,11 @@ import UIKit
 /// Expo Module wrapping the native `ZoneNetworkManager`. Function order mirrors
 /// the native class and the Kotlin module so the three can be diffed side by side.
 ///
-/// Every event except `onVoice` is wired for the module's lifetime. `onVoice`
-/// is wired only while JS has a listener: the native closure, when set, takes
-/// every clip away from the built-in player.
+/// Every event except `onVoice` and `onSnappedLocation` is wired for the
+/// module's lifetime. `onVoice` is wired only while JS has a listener: the
+/// native closure, when set, takes every clip away from the built-in player.
+/// `onSnappedLocation` likewise, so a host that does not draw a marker pays
+/// nothing per tick.
 ///
 /// The built-in player is switched on at creation. Natively it defaults to off
 /// on iOS but plays by default on Android; turning it on here gives JS the same
@@ -23,8 +25,9 @@ import UIKit
 /// runs synchronously on the caller's thread, reading the closures and
 /// `useBuiltInVoicePlayer` as it goes — so writing those properties on main
 /// while a tick ran on the JS thread would race. One FIFO (the main queue)
-/// also keeps `configure` / `reset` / `onLocation` in the order JS issued
-/// them. Native callbacks fire on main too, which is where the restriction
+/// also keeps `configure` / `logout` / `reset` / `onLocation` in the order JS
+/// issued them; `configure` is an async function run on `.main` for the same
+/// reason. Native callbacks fire on main too, which is where the restriction
 /// cache lives.
 ///
 /// Events go through `emit(event:payload:)` (JSI), not `sendEvent`: the latter
@@ -50,7 +53,10 @@ public class MapZoneSpeedAlertModule: Module {
       "onBuildupArea",
       "onVoice",
       "onResult",
-      "onReady"
+      "onReady",
+      "onSnappedLocation",
+      // Internal: settles the JS promise of `logout()`, matched by requestId.
+      "onLogoutResult"
     )
 
     Class(AlertSignRef.self) {
@@ -134,16 +140,45 @@ public class MapZoneSpeedAlertModule: Module {
       onMain { [weak self] in self?.manager.onVoice = nil }
     }
 
-    Function("configure") { (options: ConfigureRecord) in
-      let manager = self.manager
-      onMain {
-        // Weight is truncated like Android's `(int) weights`; JS has already
-        // rejected non-finite values, which would trap here.
-        manager.configure(
-          baseUrl: options.baseUrl, apiKeyId: options.apiKeyId, apiKey: options.apiKey,
-          vehicleId: options.vehicleId, vehicleType: options.vehicleType, seats: options.seats,
-          weights: Int(options.weights)
-        )
+    OnStartObserving("onSnappedLocation") {
+      onMain { [weak self] in
+        self?.manager.onSnappedLocation = { [weak self] latitude, longitude, bearingDegrees in
+          let payload: [String: Any?] = [
+            "latitude": latitude, "longitude": longitude, "bearingDegrees": bearingDegrees,
+          ]
+          self?.emit(event: "onSnappedLocation", payload: payload)
+        }
+      }
+    }
+    OnStopObserving("onSnappedLocation") {
+      onMain { [weak self] in self?.manager.onSnappedLocation = nil }
+    }
+
+    // Resolves null when applied, otherwise the native reason. JS has already
+    // checked `vehicleType` against `VehicleType`.
+    AsyncFunction("configure") { (options: ConfigureRecord) throws -> String? in
+      guard let vehicleType = VehicleType(rawValue: options.vehicleType) else {
+        throw UnknownVehicleTypeException(options.vehicleType)
+      }
+      return self.manager.configure(
+        baseUrl: options.baseUrl, apiKeyId: options.apiKeyId, apiKey: options.apiKey,
+        identity: options.identity, vehicleType: vehicleType, seats: options.seats,
+        weightsTons: options.weightsTons, metadata: options.metadata
+      )
+    }.runOnQueue(.main)
+    // Native closes the zone gate before returning (on main, ahead of any fix
+    // queued after it) and reports the server logout on the main thread, sent
+    // back as `onLogoutResult`. Same shape as Android, where the call has to
+    // stay on the JS thread.
+    Function("logout") { (requestId: Int) in
+      onMain { [weak self] in
+        self?.manager.logout { [weak self] success, errorCode, errorMessage in
+          let payload: [String: Any?] = [
+            "requestId": requestId, "success": success, "errorCode": errorCode,
+            "errorMessage": errorMessage,
+          ]
+          self?.emit(event: "onLogoutResult", payload: payload)
+        }
       }
     }
     // `updateLocation` enqueues the zone load on the SDK's serial queue;
@@ -192,6 +227,7 @@ public class MapZoneSpeedAlertModule: Module {
         manager.onVoice = nil
         manager.onResult = nil
         manager.onReady = nil
+        manager.onSnappedLocation = nil
         manager.useBuiltInVoicePlayer = false
         if isActiveModule { manager.reset() }
       }
@@ -202,6 +238,13 @@ public class MapZoneSpeedAlertModule: Module {
   private func replay(_ eventName: String, _ state: RestrictionState?) {
     guard let state, state.kind != 0 else { return }
     emit(event: eventName, payload: RestrictionPayload(state))
+  }
+}
+
+/// `configure` received a code that is not a native `VehicleType` case.
+final class UnknownVehicleTypeException: GenericException<Int>, @unchecked Sendable {
+  override var reason: String {
+    "vehicleType must be a VehicleType, got \(param)"
   }
 }
 

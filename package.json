@@ -1,6 +1,6 @@
 {
   "name": "@mapzone/speed-alert",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Speed-limit, camera, toll and restriction alerts from the road network around the vehicle (zone-based, no route needed) for React Native apps.",
   "main": "build/index.js",
   "types": "build/index.d.ts",
