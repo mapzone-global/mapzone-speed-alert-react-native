@@ -84,8 +84,7 @@ npx expo install @mapzone/speed-alert expo-image
 
 ### Android
 
-The native SDK (`com.github.mapzone-global:mapzone_speed_alert_android`) is
-resolved from JitPack. If your project locks repositories with
+The native SDK is resolved from JitPack. If your project locks repositories with
 `RepositoriesMode.FAIL_ON_PROJECT_REPOS` in `settings.gradle`, add JitPack
 there:
 

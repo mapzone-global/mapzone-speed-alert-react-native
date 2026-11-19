@@ -1,10 +1,8 @@
 # Changelog
 
-## 2.0.0 (unreleased)
+## 2.0.0 (2026-11-19)
 
-Moves to native MapZone Speed Alert SDK **3.0.0** — Android JitPack
-`com.github.mapzone-global:mapzone_speed_alert_android:3.0.0`, iOS CocoaPods
-`MapZoneSpeedAlertSDK 3.0.0`. Breaking; see "Upgrading from 1.x" in the README.
+Moves to native MapZone Speed Alert SDK **3.0.1**.
 
 - `configure()` now signs a user in and returns `Promise<void>`: await it
   before the first `onLocation()`; it rejects with the native reason (and
@@ -19,7 +17,7 @@ Moves to native MapZone Speed Alert SDK **3.0.0** — Android JitPack
 - New `MapZoneError` constants; error codes reorganised by the native SDK
   (`2006`, `2008`, `-6`, `-8`, …).
 
-## 1.0.0 (2024-06-19)
+## 1.0.0 (2026-09-30)
 
 Initial release.
 
