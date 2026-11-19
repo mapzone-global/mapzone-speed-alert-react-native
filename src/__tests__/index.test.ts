@@ -3,12 +3,15 @@ import { act, create } from 'react-test-renderer';
 
 import {
   AccessRestrictionKind,
+  addSnappedLocationListener,
   configure,
+  logout,
   onLocation,
   setMutedAlertTypes,
   setVoiceProfile,
   setVoiceSpeed,
   useSpeedAlertSigns,
+  VehicleType,
   VoiceAlertType,
   VoiceProfile,
 } from '../index';
@@ -20,7 +23,8 @@ jest.mock('../MapZoneSpeedAlertModule', () => {
   return {
     __esModule: true,
     default: {
-      configure: jest.fn(),
+      configure: jest.fn(() => null),
+      logout: jest.fn(),
       onLocation: jest.fn(),
       reset: jest.fn(),
       setMutedAlertTypes: jest.fn(),
@@ -47,11 +51,13 @@ const configureOptions = {
   baseUrl: 'https://example.invalid',
   apiKeyId: 'id',
   apiKey: 'key',
-  vehicleId: 'vehicle',
-  vehicleType: 1,
+  identity: '+84901234567',
+  vehicleType: VehicleType.TRUCK,
   seats: 4,
-  weights: 1500,
+  weightsTons: 1.5,
 };
+
+const nativeConfigureOptions = { ...configureOptions, metadata: null };
 
 function signRef() {
   return { release: jest.fn() };
@@ -60,25 +66,133 @@ function signRef() {
 beforeEach(() => jest.clearAllMocks());
 
 describe('configure', () => {
-  it('forwards https options to native', () => {
-    configure(configureOptions);
-    expect(nativeModule.configure).toHaveBeenCalledWith(configureOptions);
+  it('forwards https options to native with metadata serialised', async () => {
+    await configure({ ...configureOptions, metadata: { appVersion: '1.4.0' } });
+    expect(nativeModule.configure).toHaveBeenCalledWith({
+      ...nativeConfigureOptions,
+      metadata: '{"appVersion":"1.4.0"}',
+    });
   });
 
-  it('throws on a non-https baseUrl without calling native', () => {
-    expect(() => configure({ ...configureOptions, baseUrl: 'http://example.invalid' })).toThrow(
-      /https/
+  it('passes a missing metadata as null', async () => {
+    await configure(configureOptions);
+    expect(nativeModule.configure).toHaveBeenCalledWith(nativeConfigureOptions);
+  });
+
+  it('reaches native synchronously, in call order with the fixes that follow', () => {
+    const first = configure(configureOptions);
+    const second = configure({ ...configureOptions, identity: '+84900000000' });
+    onLocation({ lat: 21, lng: 105, bearing: 0, speedKmh: 0, accuracy: 5, fixTimeMillis: 1 });
+
+    const [configureA, configureB] = nativeModule.configure.mock.invocationCallOrder;
+    const [fix] = nativeModule.onLocation.mock.invocationCallOrder;
+    expect(configureA).toBeLessThan(configureB);
+    expect(configureB).toBeLessThan(fix);
+    return Promise.all([first, second]);
+  });
+
+  it('turns a native throw into a rejection', async () => {
+    nativeModule.configure.mockImplementationOnce(() => {
+      throw new Error('application id could not be resolved');
+    });
+    await expect(configure(configureOptions)).rejects.toThrow(
+      'application id could not be resolved'
     );
+  });
+
+  it('rejects with the native reason when native refuses the configuration', async () => {
+    nativeModule.configure.mockReturnValueOnce('identity must not be empty');
+    await expect(configure({ ...configureOptions, identity: '' })).rejects.toThrow(
+      'MapZoneSpeedAlert.configure: identity must not be empty'
+    );
+  });
+
+  it('accepts a promise from native (iOS) the same way', async () => {
+    nativeModule.configure.mockReturnValueOnce(Promise.resolve('metadata is not a JSON object'));
+    await expect(configure(configureOptions)).rejects.toThrow('metadata is not a JSON object');
+  });
+
+  it('rejects a non-https baseUrl without calling native', async () => {
+    await expect(
+      configure({ ...configureOptions, baseUrl: 'http://example.invalid' })
+    ).rejects.toThrow(/https/);
     expect(nativeModule.configure).not.toHaveBeenCalled();
   });
 
   it.each([
     ['vehicleType', { vehicleType: Number.NaN }],
+    ['vehicleType outside VehicleType', { vehicleType: 6 }],
     ['seats', { seats: 4.5 }],
-    ['weights', { weights: Number.POSITIVE_INFINITY }],
-  ])('rejects a non-finite or fractional %s without calling native', (_, override) => {
-    expect(() => configure({ ...configureOptions, ...override })).toThrow(TypeError);
+    ['weightsTons', { weightsTons: Number.POSITIVE_INFINITY }],
+  ])('rejects an invalid %s without calling native', async (_, override) => {
+    await expect(configure({ ...configureOptions, ...override })).rejects.toThrow(TypeError);
     expect(nativeModule.configure).not.toHaveBeenCalled();
+  });
+});
+
+describe('logout', () => {
+  function answer(requestId: number, result = { success: true, errorCode: 0, errorMessage: '' }) {
+    nativeModule.emit('onLogoutResult', { requestId, ...result });
+  }
+
+  it('resolves with the native answer to its own request, failure included', async () => {
+    const loggedOut = logout();
+    const [requestId] = nativeModule.logout.mock.calls[0];
+    const failure = { success: false, errorCode: -4, errorMessage: 'Server unreachable.' };
+
+    answer(requestId + 1000);
+    answer(requestId, failure);
+
+    await expect(loggedOut).resolves.toEqual(failure);
+    expect(nativeModule.listenerCount('onLogoutResult')).toBe(0);
+  });
+
+  it('gives each call its own request id', async () => {
+    const first = logout();
+    const second = logout();
+    const [[firstId], [secondId]] = nativeModule.logout.mock.calls;
+    expect(firstId).not.toBe(secondId);
+
+    answer(secondId);
+    answer(firstId, { success: false, errorCode: -8, errorMessage: 'Device not ready.' });
+    await expect(first).resolves.toMatchObject({ errorCode: -8 });
+    await expect(second).resolves.toMatchObject({ success: true });
+  });
+
+  it('reaches native synchronously, so a following configure cannot overtake it', async () => {
+    const loggedOut = logout();
+    const configured = configure({ ...configureOptions, identity: '+84900000000' });
+
+    const [logoutCall] = nativeModule.logout.mock.invocationCallOrder;
+    const [configureCall] = nativeModule.configure.mock.invocationCallOrder;
+    expect(logoutCall).toBeLessThan(configureCall);
+    await configured;
+
+    answer(nativeModule.logout.mock.calls[0][0]);
+    await loggedOut;
+  });
+
+  it('rejects and unsubscribes when the native call throws', async () => {
+    nativeModule.logout.mockImplementationOnce(() => {
+      throw new Error('native module unavailable');
+    });
+    await expect(logout()).rejects.toThrow('native module unavailable');
+    expect(nativeModule.listenerCount('onLogoutResult')).toBe(0);
+  });
+});
+
+describe('addSnappedLocationListener', () => {
+  it('delivers native snapped locations until removed', () => {
+    const listener = jest.fn();
+    const subscription = addSnappedLocationListener(listener);
+    const event = { latitude: 21.1, longitude: 105.8, bearingDegrees: 270 };
+
+    nativeModule.emit('onSnappedLocation', event);
+    subscription.remove();
+    nativeModule.emit('onSnappedLocation', event);
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith(event);
   });
 });
 

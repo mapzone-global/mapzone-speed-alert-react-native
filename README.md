@@ -8,6 +8,9 @@ go anywhere and the SDK follows.
 > Following a planned route instead? Use `@mapzone/nav-speed-alert`. Both
 > packages can live in the same app (§10).
 
+> **Upgrading from 1.x?** 2.0.0 runs on native SDK 3.0.1 and is a breaking
+> release: the user now signs in. See [Upgrading from 1.x](#upgrading-from-1x).
+
 ## 1. Overview
 
 The SDK does one job: given a stream of **GPS fixes**, it tells you — once per
@@ -32,7 +35,11 @@ toll)    vehicle ban)  no parking)                               error)
 
 Sign images arrive as native references (`AlertSignRef`) that you hand straight
 to `expo-image`. Voice plays through a built-in native player unless you choose
-to receive the clips yourself.
+to receive the clips yourself. If you draw the vehicle on a map,
+`onSnappedLocation` gives each fix moved onto the matched road (§5).
+
+Every request is made for a **signed-in identity** — the user of your app —
+passed to `configure()` and signed out with `logout()` (§4, §5).
 
 ## 2. Prerequisites
 
@@ -43,13 +50,20 @@ to receive the clips yourself.
 | iOS | ≥ 16.4 |
 | Android | minSdk 24; ABIs `arm64-v8a`, `armeabi-v7a` only (**no x86 / x86_64**) |
 | Peer dependency | `expo-image` (renders the native sign references) |
-| Credentials | `baseUrl`, `apiKeyId`, `apiKey`, `vehicleId` issued by MapZone |
+| Credentials | `baseUrl`, `apiKeyId`, `apiKey` issued by MapZone, plus the signed-in user's `identity` |
+| Native SDK | Android `com.github.mapzone-global:mapzone_speed_alert_android:3.0.1`, iOS pod `MapZoneSpeedAlertSDK 3.0.1` (declared by the module) |
 
 **Your application id must be registered with the alert service.** The SDK
 sends the running app's id (Android `applicationId`, iOS bundle identifier)
 when it authenticates. Build variants with an id suffix (`com.foo.debug`) are
-rejected unless they are registered too. A mismatch shows up as a `2xxx` error
-code in `onResult` (§8). Register every platform id you test with.
+rejected unless they are registered too. A mismatch shows up as `2004` in
+`onResult` (§8). Register every platform id you test with.
+
+**Store privacy forms.** The SDK sends a device identifier and the precise
+location, linked to the signed-in user. Declare them in Google Play's *Data
+safety* form (Device or other IDs + Precise location) and in the App Store
+privacy details (Device ID + Precise Location, app functionality, not used
+for tracking).
 
 **Android emulators:** the native library has no x86 slice, so standard Intel
 emulator images cannot load it — the SDK stays inert and reports `-5` in
@@ -104,38 +118,78 @@ npx expo run:ios
 
 ## 4. Configuration
 
-Call `configure()` **once**, before the first `onLocation()`. All fields are
-required.
+Call `configure()` when the user signs in — and on every app launch with a
+user already signed in (the SDK does not remember the identity across
+launches) — and **await it before the first `onLocation()`**.
 
 ```ts
 import * as SpeedAlert from '@mapzone/speed-alert';
+import { VehicleType } from '@mapzone/speed-alert';
 
-SpeedAlert.configure({
-  baseUrl: 'https://driving.map.zone', // must start with https://
-  apiKeyId: '<your-api-key-id>',
-  apiKey: '<your-api-key>',            // a credential: keep it out of source control and logs
-  vehicleId: '<your-vehicle-id>',
-  vehicleType: 1,                      // 1..9, see table below
-  seats: 5,                            // integer
-  weights: 1500,                       // gross weight in kg (fractions are truncated)
-});
+try {
+  await SpeedAlert.configure({
+    baseUrl: 'https://driving.map.zone', // must start with https://
+    apiKeyId: '<your-api-key-id>',
+    apiKey: '<your-api-key>',            // a credential: keep it out of source control and logs
+    identity: '+84901234567',            // the signed-in user — see Identity
+    vehicleType: VehicleType.CAR,        // see table below
+    seats: 5,                            // integer, 0 or more
+    weightsTons: 1.5,                    // gross weight in TONNES
+    metadata: { appVersion: '1.4.0' },   // optional — see Metadata
+  });
+} catch (error) {
+  // Rejected: nothing was applied, the previous configuration stays in effect.
+}
 ```
 
-| `vehicleType` | Vehicle |
-|---|---|
-| 1 | Car |
-| 2 | Motorcycle |
-| 3 | Truck |
-| 4 | Coach |
-| 5 | Bus |
-| 6 | Taxi |
-| 7 | Bicycle |
-| 8 | Pedestrian |
-| 9 | Emergency vehicle |
+`configure()` **rejects** when an input is invalid — identity, vehicle type,
+seats, weight, metadata, or a `baseUrl` that is not `https://` — with a short
+English reason as the message, and then applies nothing. Everything that fails
+*after* that (sign-in refused, account in use elsewhere, server down) arrives
+through `onResult` as a numeric code (§8), never as a rejection.
 
-`vehicleType`, `seats` and `weights` decide which alerts apply to you. The
+| `VehicleType` | Code | Vehicle |
+|---|---|---|
+| `CAR` | 1 | Car |
+| `TAXI` | 2 | Taxi |
+| `BUS` | 3 | Bus |
+| `COACH` | 4 | Coach |
+| `TRUCK` | 5 | Truck |
+| `MOTORCYCLE` | 7 | Motorcycle |
+
+Each code is the MapZone server's own vehicle code and is sent unchanged; any
+other number is rejected. The type must also be enabled for your API key —
+otherwise sign-in reports `1001` and zone loads `3003`.
+
+`vehicleType`, `seats` and `weightsTons` decide which alerts apply to you. The
 "vehicle restricted" sign (§6.3) is computed for exactly this profile, and
 `vehicleType` also picks which artwork that sign uses.
+
+### Identity
+
+The user (or vehicle) signed in on this device, sent verbatim with every
+request — typically the account's phone number in `+84…` form. Pick one kind of
+identity for your app and keep it: the service matches it **exactly**
+(`"0901234567"` and `"+84901234567"` are two different people).
+
+- Non-empty, at most **128** characters, no `"` and no control characters.
+- One identity is active on one device at a time. Signing the same identity in
+  on another device moves its session there, and this device receives `2006`.
+- Switching to a **different** identity on the same device is only allowed
+  **20 minutes** after this device last opened a session (`2008` otherwise).
+
+### Metadata
+
+`metadata` is optional, free-form information agreed between you and MapZone
+(app version, internal user id, …). The SDK adds the device `model` and `os`
+unless you set them.
+
+- A plain object, serialised to JSON: at most **2048 UTF-8 bytes**, nesting
+  depth at most **16**. `null` or omitted = none.
+- Recorded only when a session is **opened**: on the first sign-in on this
+  device, or when the identity changes. Calling `configure()` again with the
+  same identity keeps the metadata stored at sign-in; to record new metadata
+  the user has to `logout()` and sign in again.
 
 ### Changing the vehicle profile
 
@@ -145,14 +199,24 @@ The profile is fixed for a session. When the driver switches vehicle, call
 ## 5. Session lifecycle
 
 ```ts
-// Once, before the first fix (and again after a profile change):
-SpeedAlert.configure(options);
+// On sign-in / app launch, before the first fix (and again after a profile change):
+await SpeedAlert.configure(options);
 
 // Every GPS fix, ~1 Hz:
 SpeedAlert.onLocation({ lat, lng, bearing, speedKmh, accuracy, fixTimeMillis });
 
-// Session ends:
+// Driving session ends:
 SpeedAlert.reset();
+
+// The user signs out of your app (and after 2006):
+await SpeedAlert.logout();
+```
+
+```
+configure(identity) ──► signed in (the SDK logs in, in the background)
+        │                    │ 2006 / 2007 / 2005 / … reported once ──► zone loads stop
+        │                    │                                         (loaded zone keeps alerting)
+        └── logout() ────────┴─► zone loads stop at once ─► server logout ─► { success: true }
 ```
 
 ### `onLocation(fix)`
@@ -206,7 +270,51 @@ fresh zone. The mute set, voice profile and voice speed (§7) are kept. Safe to
 call repeatedly. Call it when the session ends or the vehicle profile changes;
 also call it on component unmount so a hot reload does not leave a stale
 session running. On iOS it also stops the clip being played and drops the
-voice queue.
+voice queue. `reset()` does **not** sign the user out — use `logout()`.
+
+### `logout()`
+
+```ts
+const { success, errorCode, errorMessage } = await SpeedAlert.logout();
+```
+
+Signs the identity out. Zone loads stop at once: no `onLocation()` or
+`configure()` you issue after `logout()` can overtake it, so no later fix can
+reopen the session. The zone already loaded keeps alerting, and later loads
+report `-6` until `configure()` signs someone in again. The promise resolves
+with the server's answer (`success` is also `true` when nobody was signed
+in); a failed logout is `success: false`, not a rejection. When `success` is
+`false` (e.g. offline) the SDK stays signed out locally — call `logout()`
+again to retry.
+
+- **Kicked out (`2006`)**: the identity was signed in on another device and the
+  SDK has stopped loading zones. Tell the user ("Your account is in use on
+  another device"), call `logout()` — the server answers "no session", which
+  counts as success — and take the user back to sign-in. Signing in again
+  within 20 minutes may return `2008`.
+- Signing the next user in right away is fine: `logout(); configure(next)`
+  reaches native in that order, and `configure()` does not wait for the
+  server logout (the SDK sends the sign-out before the next sign-in).
+
+### Snapped location
+
+Optional, for drawing the vehicle marker on a map: each fix moved onto the
+road the engine is serving, so the marker stays on the road instead of
+following raw GPS noise.
+
+```ts
+const sub = SpeedAlert.addSnappedLocationListener(({ latitude, longitude, bearingDegrees }) => {
+  // bearingDegrees: road bearing in the direction of travel, 0 = north, clockwise, [0, 360)
+  moveVehicleMarker(latitude, longitude, bearingDegrees);
+});
+// Later: sub.remove();
+```
+
+It fires once per fix matched to a road. Unmatched fixes (zone not loaded yet,
+no road nearby) produce no event — keep the marker where it last was. Inside a
+short coverage hole the engine keeps serving the last matched road, so the same
+point can repeat. The native callback is registered only while a listener
+exists.
 
 ## 6. Receiving signs
 
@@ -439,22 +547,36 @@ SpeedAlert.addResultListener((e) => {
 });
 ```
 
-| `errorCode` | Meaning |
-|---|---|
-| `0` | Success — zone loaded |
-| `1001` | Location is outside the supported area |
-| other `1xxx` | Invalid request |
-| `2xxx` | Session expired / unauthorized — `apiKeyId`, `apiKey` or application id mismatch (§2) |
-| `3003` | `vehicleType` not supported (must be 1..9) |
-| `3004` | No map data for this area |
-| other `3xxx` | Requested data not found |
-| `5xxx` | Server temporarily unavailable — retry later |
-| `-1` | Response could not be verified |
-| `-2` | Map data empty, malformed or unusable |
-| `-3` | Secure session could not be established |
-| `-4` | Server unreachable — check connectivity |
-| `-5` | Native engine unavailable: library missing for this device's ABI (§2), configuration rejected, or a native call failed. Reported once per outage, not on every fix. |
-| `-99` | Older spelling of `-5` from older engine builds; same meaning. |
+Whatever the code, the zone already loaded keeps alerting; what changes is
+whether the SDK keeps loading new zones. Codes that stop or pause loading are
+reported **once**, not on every fix. `MapZoneError` names the codes you are
+expected to act on.
+
+| `errorCode` | Meaning | SDK |
+|---|---|---|
+| `0` | Success — zone loaded | — |
+| `2006` `SESSION_MOVED` | The identity is now in use on another device | Stops until `configure()` — see `logout()` (§5) |
+| `2007` `LOCKED` | Device or identity locked by an administrator | Stops until `configure()` |
+| `2002` / `2003` / `2004` | API key, signature or application id not accepted (§2) | Stops until `configure()` |
+| `2005` | Service plan expired | Stops until `configure()` |
+| `2010` `TRIAL_IDENTITY_NOT_ALLOWED` | Trial API key: this identity is not one of the key's sample identities | Stops until `configure()` |
+| `3003` | Vehicle type not enabled for the API key | Stops until `configure()` |
+| `3011` / `3012` `NEW_DEVICE_LIMIT` | Device limit of the API key reached | Stops until `configure()` |
+| `4001` `REQUEST_QUOTA_EXCEEDED` | Request quota of the API key used up | Stops until `configure()` |
+| `1002` | Missing parameter | Stops until `configure()` |
+| `1001` | Sign-in: identity or vehicle rejected · Zone: request rejected (e.g. outside the served area) | Sign-in: stops until `configure()` · Zone: keeps going |
+| `2008` `SWITCH_TOO_SOON` | Account on this device changed too recently | Pauses **20 minutes**, then resumes on its own |
+| `4000` `TOO_MANY_REQUESTS` / `5000` / `5004` / `2009` | Server busy or failing | Waits for the server's `Retry-After` (or backs off), then resumes |
+| `2000` | Device clock is wrong — fix the time | Keeps going |
+| other `1000`–`5999` | Request invalid / not found / server error | Keeps going |
+| `-1` | Response could not be verified | Keeps going |
+| `-2` | Map data empty, malformed or unusable | Keeps going |
+| `-3` | Secure session could not be established — the SDK retries | Keeps going |
+| `-4` | Server unreachable — check connectivity | Keeps going |
+| `-5` | Native engine unavailable: library missing for this device's ABI (§2), or a native call failed. Reported once per outage. | — |
+| `-6` `NOT_LOGGED_IN` | No identity signed in (`logout()` was called, or `configure()` never was) | Stops until `configure()` |
+| `-8` `DEVICE_NOT_READY` | The device cannot be read yet (an iPhone not unlocked since restart, a storage read failure on Android). The SDK re-reads about once a minute; show a notice. `logout()` also resolves with `-8` in that state — call it again later | Pauses, then resumes on its own |
+| `-99` | Older spelling of `-5` from older engine builds; same meaning. | — |
 
 `errorMessage` is a short, display-ready English sentence derived from
 `errorCode` alone — the server's own wording never reaches your app. Localise
@@ -475,8 +597,9 @@ alerts.
 
 ## 9. Putting it together
 
-A complete minimal integration: configure, feed GPS and reset from one session
-hook, render the signs from one overlay.
+A complete minimal integration: sign in, feed GPS and reset from one session
+hook, render the signs from one overlay. Call `logout()` from your own
+sign-out flow.
 
 ```tsx
 import * as SpeedAlert from '@mapzone/speed-alert';
@@ -493,7 +616,6 @@ export function useSpeedAlertSession(options: SpeedAlert.ConfigureOptions) {
     let isCancelled = false;
     let gps: Location.LocationSubscription | undefined;
 
-    SpeedAlert.configure(options);
     const subs = [
       SpeedAlert.addResultListener((e) => {
         if (!e.success) console.warn('speed alert', e.errorCode, e.errorMessage);
@@ -502,6 +624,12 @@ export function useSpeedAlertSession(options: SpeedAlert.ConfigureOptions) {
     ];
 
     (async () => {
+      try {
+        await SpeedAlert.configure(options);
+      } catch (error) {
+        console.warn('speed alert configuration rejected', error);
+        return;
+      }
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted' || isCancelled) return;
       const subscription = await Location.watchPositionAsync(
@@ -575,3 +703,46 @@ const S = StyleSheet.create({
   dist: { fontSize: 12 },
 });
 ```
+## Upgrading from 1.x
+
+2.0.0 moves to native SDK 3.0.1 (Android `3.0.1`, iOS `3.0.1`). Code written
+for 1.x no longer type-checks.
+
+| 1.x | 2.0.0 |
+|---|---|
+| `configure(options): void` | `configure(options): Promise<void>` — await it; rejects with the reason when an input is refused |
+| `vehicleId: string` | `identity: string` — the signed-in user (§4); put the old value in `metadata` if you still need it |
+| `vehicleType: number` (1 car, 2 motorcycle, 3 truck, 4 coach, 5 bus, 6 taxi, 7–9) | `vehicleType: VehicleType` — server codes, see the mapping below |
+| `weights: number` (kg) | `weightsTons: number` (tonnes): 1500 kg → `1.5` |
+| — | `metadata?: object` (§4) |
+| — | `logout(): Promise<LogoutResult>` (§5) |
+| — | `addSnappedLocationListener` / `onSnappedLocation` (§5) |
+| — | `MapZoneError` constants and new codes (§8) |
+
+| Vehicle | 1.x number | 2.0.0 |
+|---|---|---|
+| Car | `1` | `VehicleType.CAR` |
+| Motorcycle | `2` | `VehicleType.MOTORCYCLE` |
+| Truck | `3` | `VehicleType.TRUCK` |
+| Coach | `4` | `VehicleType.COACH` |
+| Bus | `5` | `VehicleType.BUS` |
+| Taxi | `6` | `VehicleType.TAXI` |
+| Bicycle / pedestrian / emergency | `7` / `8` / `9` | Not supported — contact MapZone |
+
+Do **not** pass an old number straight through: `3` was a truck in 1.x and is a
+bus in 2.0.0.
+
+Steps:
+
+1. `npx expo install @mapzone/speed-alert@^2.0.0`, then rebuild (`npx pod-install`
+   on iOS picks up `MapZoneSpeedAlertSDK 3.0.1`).
+2. Replace `vehicleId` with `identity`, convert `vehicleType` with the table,
+   pass the weight in tonnes as `weightsTons`.
+3. `await configure()` on every sign-in and app launch with a signed-in user,
+   and handle its rejection.
+4. Call `logout()` when the user signs out, and after `2006`.
+5. Update your `onResult` handling for the new codes (§8).
+6. Update the store privacy forms (§2).
+
+Unchanged: `onLocation`, `reset`, every sign / restriction / voice event,
+`useSpeedAlertSigns`, muting, voice profile and voice speed.
