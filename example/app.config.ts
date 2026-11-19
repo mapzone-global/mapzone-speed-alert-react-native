@@ -36,10 +36,11 @@ const config: ExpoConfig = {
     baseUrl: env('SPEED_ALERT_BASE_URL'),
     apiKeyId: env('SPEED_ALERT_API_KEY_ID'),
     apiKey: env('SPEED_ALERT_API_KEY'),
-    vehicleId: env('SPEED_ALERT_VEHICLE_ID', '10'),
+    identity: env('SPEED_ALERT_IDENTITY'),
     vehicleType: Number(env('SPEED_ALERT_VEHICLE_TYPE', '1')),
     seats: Number(env('SPEED_ALERT_SEATS', '5')),
-    weights: Number(env('SPEED_ALERT_WEIGHTS', '1500')),
+    weightsTons: Number(env('SPEED_ALERT_WEIGHTS_TONS', '1.5')),
+    metadata: { app: 'mapzone-speed-alert-example' },
   },
 };
 

@@ -34,6 +34,7 @@ export default function App() {
   const [voiceSpeed, setVoiceSpeed] = useState(1);
   const [muted, setMuted] = useState<Set<VoiceAlertType>>(new Set());
   const [zone, setZone] = useState<SpeedAlert.ReadyEvent | null>(null);
+  const [snapped, setSnapped] = useState<SpeedAlert.SnappedLocationEvent | null>(null);
   const [log, setLog] = useState<string[]>([]);
 
   const simulatorRef = useRef<TrackSimulator | null>(null);
@@ -54,13 +55,17 @@ export default function App() {
     setRunning(false);
   }, []);
 
+  // Sign in. configure() rejects, applying nothing, when native refuses an input.
+  const signIn = useCallback(() => {
+    SpeedAlert.configure(extra).then(
+      () => appendLog('configure() accepted'),
+      (error) => appendLog(String(error))
+    );
+  }, [appendLog]);
+
   // configure once + always-on listeners
   useEffect(() => {
-    try {
-      SpeedAlert.configure(extra);
-    } catch (error) {
-      appendLog(String(error));
-    }
+    signIn();
     const subscriptions = [
       SpeedAlert.addResultListener((event) =>
         appendLog(`result ok=${event.success} code=${event.errorCode} ${event.errorMessage}`)
@@ -69,13 +74,14 @@ export default function App() {
         setZone(event);
         appendLog(`zone ready links=${event.linkCount} alerts=${event.alertCount}`);
       }),
+      SpeedAlert.addSnappedLocationListener(setSnapped),
     ];
     return () => {
       subscriptions.forEach((subscription) => subscription.remove());
       stopSources();
       SpeedAlert.reset();
     };
-  }, [appendLog, stopSources]);
+  }, [appendLog, signIn, stopSources]);
 
   // Subscribing silences the built-in player; unsubscribing restores it.
   useEffect(() => {
@@ -125,8 +131,14 @@ export default function App() {
     stopSources();
     SpeedAlert.reset();
     setZone(null);
+    setSnapped(null);
     appendLog('reset()');
   }, [stopSources, appendLog]);
+
+  const onLogout = useCallback(async () => {
+    const result = await SpeedAlert.logout();
+    appendLog(`logout ok=${result.success} code=${result.errorCode} ${result.errorMessage}`);
+  }, [appendLog]);
 
   const toggleMute = (type: VoiceAlertType) => {
     const next = new Set(muted);
@@ -156,6 +168,12 @@ export default function App() {
           <Text>
             speedStatus: {signs?.speedStatus ?? '-'} · zone:{' '}
             {zone ? `${zone.linkCount} links / ${zone.alertCount} alerts` : 'not loaded'}
+          </Text>
+          <Text>
+            snapped:{' '}
+            {snapped
+              ? `${snapped.latitude.toFixed(6)},${snapped.longitude.toFixed(6)} ${snapped.bearingDegrees.toFixed(0)}°`
+              : '-'}
           </Text>
           <View style={styles.row}>
             <SignSlot label="current" sign={signs?.current} />
@@ -204,6 +222,13 @@ export default function App() {
           <View style={styles.rowCenter}>
             <Button title={running ? 'Restart' : 'Start'} onPress={onStart} />
             <Button title="Reset" onPress={onReset} />
+          </View>
+        </Section>
+
+        <Section title="Session">
+          <View style={styles.rowCenter}>
+            <Button title="Sign in (configure)" onPress={signIn} />
+            <Button title="Logout" onPress={onLogout} />
           </View>
         </Section>
 
